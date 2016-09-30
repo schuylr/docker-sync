@@ -80,9 +80,12 @@ module Docker_Sync
         stdout, stderr, exit_status = Open3.capture3(cmd)
         if not exit_status.success?
           say_status 'error', "Error starting sync, exit code #{$?.exitstatus}", :red
+          say_status 'message', stdout
           say_status 'message', stderr
         else
-          TerminalNotifier.notify("Synced #{@options['src']}", :title => 'Docker-Sync')
+          TerminalNotifier.notify(
+              "Synced #{@options['src']}", :title => @sync_name
+          ) if @options['notify_terminal']
           say_status 'ok', "Synced #{@options['src']}", :white
           if @options['verbose']
             say_status 'output', stdout
@@ -92,9 +95,21 @@ module Docker_Sync
 
       def sync_options
         args = []
+        exclude_type = 'Path'
+        unless @options['sync_excludes_type'].nil?
+          exclude_type = @options['sync_excludes_type']
+        end
 
         unless @options['sync_excludes'].nil?
-          args = @options['sync_excludes'].map { |pattern| "-ignore='Path #{pattern}'" } + args
+          args = @options['sync_excludes'].map do |pattern|
+            if exclude_type == 'none'
+              # the ignore type like Name / Path are part of the pattern
+              ignore_string = "#{pattern}"
+            else
+              ignore_string = "#{exclude_type} #{pattern}"
+            end
+            "-ignore='#{ignore_string}'"
+          end + args
         end
         args.push(@options['src'])
         args.push('-auto')
@@ -125,14 +140,14 @@ module Docker_Sync
         end
 
         additional_docker_env = env.map{ |key,value| "-e #{key}=\"#{value}\"" }.join(' ')
-        running = `docker ps --filter 'status=running' --filter 'name=#{container_name}' | sed -E -n 's/.*\\s(.*)$/\\1/p' | grep '^#{container_name}$'`
+        running = `docker ps --filter 'status=running' --filter 'name=#{container_name}' --format "{{.Names}}" | grep '^#{container_name}$'`
         if running == ''
           say_status 'ok', "#{container_name} container not running", :white if @options['verbose']
-          exists = `docker ps --filter "status=exited" --filter "name=#{container_name}" | sed -E -n 's/.*\\s(.*)$/\\1/p' | grep '^#{container_name}$'`
+          exists = `docker ps --filter "status=exited" --filter "name=#{container_name}" --format "{{.Names}}" | grep '^#{container_name}$'`
           if exists == ''
             say_status 'ok', "creating #{container_name} container", :white if @options['verbose']
             run_privileged = '--privileged' if @options.key?('max_inotify_watches') #TODO: replace by the minimum capabilities required
-            cmd = "docker run -p '127.0.0.1::#{UNISON_CONTAINER_PORT}' \
+            cmd = "docker run -p '#{@options['sync_host_ip']}::#{UNISON_CONTAINER_PORT}' \
                               -v #{volume_name}:#{@options['dest']} \
                               -e UNISON_DIR=#{@options['dest']} \
                               -e TZ=${TZ-`readlink /etc/localtime | sed -e 's,/usr/share/zoneinfo/,,'`} \
@@ -158,7 +173,7 @@ module Docker_Sync
       end
 
       def get_host_port(container_name, container_port)
-        cmd = 'docker inspect --format=" {{ .NetworkSettings.Ports }} " ' + container_name + ' | sed -r "s/.*map\[' + container_port + '[^ ]+\s([0-9]+).*/\1/"'
+        cmd = 'docker inspect --format=" {{ .NetworkSettings.Ports }} " ' + container_name + ' | /usr/bin/sed  -E "s/.*map\[' + container_port + '[^ ]+ ([0-9]*)[^0-9].*/\1/"'
         say_status 'command', cmd, :white if @options['verbose']
         stdout, stderr, exit_status = Open3.capture3(cmd)
         if not exit_status.success?
